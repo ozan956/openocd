@@ -1,0 +1,123 @@
+name: Build and Package OpenOCD
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          autoconf automake libtool pkg-config \
+          libusb-1.0-0-dev libftdi1-dev \
+          libjim-dev tcl texinfo \
+          ruby ruby-dev rubygems \
+          gcc g++ make jq rpm \
+          libjaylink-dev xz-utils tar
+        sudo gem install --no-document fpm
+
+    - name: Determine version
+      id: version
+      run: |
+        VERSION=$(git describe --tags --abbrev=0)
+
+        if [[ ! "$VERSION" =~ ^[0-9] ]]; then
+          echo "ERROR: Version must start with a digit — got: $VERSION"
+          exit 1
+        fi
+
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo ">>> Using VERSION: $VERSION"
+
+    - name: Bootstrap
+      run: ./bootstrap
+
+    - name: Configure
+      run: |
+        ./configure \
+          --with-pkgversion="${VERSION}" \
+          --datarootdir=/usr/share \
+          --datadir=/usr/share/openocd-adi \
+          CFLAGS="-O2" \
+          LDFLAGS="-static"
+
+    - name: Build OpenOCD
+      run: make -j"$(nproc)"
+
+    - name: Build documentation
+      run: |
+        echo ">>> Building documentation"
+        make html || true   # allow failure like your script
+
+    - name: Install OpenOCD & Documentation
+      run: |
+        export PACKAGE_ROOT="$RUNNER_TEMP/pkgroot"
+        mkdir -p "$PACKAGE_ROOT"
+        echo "PACKAGE_ROOT=$PACKAGE_ROOT" >> $GITHUB_ENV
+
+        echo ">>> Installing into $PACKAGE_ROOT"
+        make install DESTDIR="$PACKAGE_ROOT"
+
+        echo ">>> Installing HTML docs manually"
+        DOC_SRC="doc/openocd.html"
+        DOC_DST="$PACKAGE_ROOT/usr/local/share/doc/openocd/openocd.html"
+
+        if [ -d "$DOC_SRC" ]; then
+            mkdir -p "$DOC_DST"
+            cp -r "$DOC_SRC/"* "$DOC_DST/"
+        else
+            echo "WARNING: HTML documentation not generated"
+        fi
+
+    - name: Build DEB and RPM packages
+      run: |
+        export PACKAGE_ROOT="$PACKAGE_ROOT"
+        export VERSION="$VERSION"
+        chmod +x ./utils/package-dist.sh
+        ./utils/package-dist.sh
+
+    # - name: Upload DEB/RPM artifacts
+    #   uses: actions/upload-artifact@v4
+    #   with:
+    #     name: openocd-packages
+    #     path: |
+    #       *.deb
+    #       *.rpm
+
+    # - name: Authenticate Cloudsmith OIDC
+    #   uses: cloudsmith-io/cloudsmith-cli-action@v1.0.3
+    #   with:
+    #     oidc-namespace: "adi"
+    #     oidc-service-slug: ${{ secrets.CLOUDSMITH_SERVICE_SLUG }}
+    #     oidc-auth-only: "false"
+
+    # - name: Upload DEB package
+    #   run: |
+    #     cloudsmith push deb adi/openocd/deb-pkg/${{ steps.version.outputs.version }} *.deb
+
+    # - name: Upload RPM package
+    #   run: |
+    #     cloudsmith push rpm adi/openocd/rpm-pkg/${{ steps.version.outputs.version }} *.rpm
+
+    - name: Inspect DEB structure
+      run: |
+        echo ">>> Listing DEB contents"
+        DEB_FILE=$(ls *.deb | head -n1)
+        echo "Using: $DEB_FILE"
+        dpkg-deb -c "$DEB_FILE" 
